@@ -1,0 +1,24 @@
+# Build output
+bin/
+obj/
+build-check/
+publish-build/
+publish-fixed/
+
+# Generated binaries and archives
+*.exe
+*.dll
+*.pdb
+*.zip
+
+# User/local IDE state
+*.user
+.vs/
+.vscode/
+
+# Temporary files
+*.tmp
+*.log
+
+# Old nested copy excluded by the active project file
+ScreenCapture/ScreenCapture/
