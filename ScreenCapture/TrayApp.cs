@@ -449,12 +449,13 @@ public class TrayApp : ApplicationContext
         var info = SourceDetector.Analyze(snapshot, visibleWindows, _lastRegion);
         info.CapturedRegion = _lastRegion;
         var savedPath = ProcessCapture(img, action);
-        var historyPath = AutoSaveHistoryCapture(img);
-        info.CapturedImagePath = savedPath ?? historyPath;
-        RefreshLibraryIfOpen();
 
         if (_settings.EnableOcr)
             info.OcrText = await OcrHelper.ExtractTextAsync(img);
+
+        var historyPath = AutoSaveHistoryCapture(img, info);
+        info.CapturedImagePath = savedPath ?? historyPath;
+        RefreshLibraryIfOpen();
 
         if (_settings.PinToDesktop || forcePin)
             ShowSticky(img, info);
@@ -484,12 +485,13 @@ public class TrayApp : ApplicationContext
         var info = SourceDetector.Analyze(snapshot, visibleWindows, _lastRegion);
         info.CapturedRegion = _lastRegion;
         var savedPath = ProcessCapture(bmp, _lastAction);
-        var historyPath = AutoSaveHistoryCapture(bmp);
-        info.CapturedImagePath = savedPath ?? historyPath;
-        RefreshLibraryIfOpen();
 
         if (_settings.EnableOcr)
             info.OcrText = await OcrHelper.ExtractTextAsync(bmp);
+
+        var historyPath = AutoSaveHistoryCapture(bmp, info);
+        info.CapturedImagePath = savedPath ?? historyPath;
+        RefreshLibraryIfOpen();
 
         if (_settings.PinToDesktop)
             ShowSticky(bmp, info);
@@ -534,7 +536,7 @@ public class TrayApp : ApplicationContext
         return savedPath;
     }
 
-    private string? AutoSaveHistoryCapture(Bitmap img)
+    private string? AutoSaveHistoryCapture(Bitmap img, CaptureInfo info)
     {
         if (!_settings.AutoSaveCaptures)
             return null;
@@ -554,6 +556,7 @@ public class TrayApp : ApplicationContext
             }
 
             SaveImage(img, path);
+            CaptureHistoryMetadata.Save(path, info);
             return path;
         }
         catch
@@ -654,6 +657,11 @@ public class TrayApp : ApplicationContext
         }
 
         _libraryForm = new CaptureLibraryForm(_settings);
+        _libraryForm.StickyRequested += (img, info) =>
+        {
+            ShowSticky(img, info);
+            img.Dispose();
+        };
         _libraryForm.FormClosed += (_, _) => _libraryForm = null;
         _libraryForm.Show();
     }

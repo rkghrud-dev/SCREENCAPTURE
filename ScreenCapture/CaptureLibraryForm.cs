@@ -19,10 +19,13 @@ public class CaptureLibraryForm : Form
     private readonly Button _folderButton;
     private readonly Button _copyButton;
     private readonly Button _deleteButton;
+    private readonly Button _stickyButton;
     private readonly List<DateBucket> _buckets = new();
 
     private Image? _previewImage;
     private string? _selectedPath;
+
+    public event Action<Bitmap, CaptureInfo>? StickyRequested;
 
     public CaptureLibraryForm(AppSettings settings)
     {
@@ -153,7 +156,7 @@ public class CaptureLibraryForm : Form
         _thumbs = new ImageList
         {
             ColorDepth = ColorDepth.Depth32Bit,
-            ImageSize = new Size(168, 104)
+            ImageSize = new Size(132, 82)
         };
 
         _captureList = new ListView
@@ -168,7 +171,7 @@ public class CaptureLibraryForm : Form
             HideSelection = false
         };
         _captureList.SelectedIndexChanged += (_, _) => ShowSelectedPreview();
-        _captureList.DoubleClick += (_, _) => OpenSelected();
+        _captureList.DoubleClick += (_, _) => OpenSelectedAsSticky();
         bodySplit.Panel1.Controls.Add(_captureList);
 
         _emptyLabel = new Label
@@ -182,13 +185,53 @@ public class CaptureLibraryForm : Form
         bodySplit.Panel1.Controls.Add(_emptyLabel);
         _emptyLabel.BringToFront();
 
+        var stickyPanel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Color.FromArgb(248, 250, 252),
+            Padding = new Padding(12)
+        };
+        stickyPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        stickyPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        stickyPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
+        bodySplit.Panel2.Controls.Add(stickyPanel);
+
+        stickyPanel.Controls.Add(new Label
+        {
+            Text = "스티키 미리보기",
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(17, 24, 39),
+            TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 0);
+
         _preview = new PictureBox
         {
             Dock = DockStyle.Fill,
             SizeMode = PictureBoxSizeMode.Zoom,
-            BackColor = Color.FromArgb(243, 244, 246)
+            BackColor = Color.FromArgb(243, 244, 246),
+            BorderStyle = BorderStyle.FixedSingle
         };
-        bodySplit.Panel2.Controls.Add(_preview);
+        stickyPanel.Controls.Add(_preview, 0, 1);
+
+        var stickyActions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            Padding = new Padding(0, 10, 0, 0)
+        };
+        stickyPanel.Controls.Add(stickyActions, 0, 2);
+
+        _stickyButton = MakeButton("스티키로 띄우기", 132);
+        _stickyButton.Click += (_, _) => OpenSelectedAsSticky();
+        stickyActions.Controls.Add(_stickyButton);
+
+        var previewOpenButton = MakeButton("이미지 열기", 104);
+        previewOpenButton.Click += (_, _) => OpenSelected();
+        stickyActions.Controls.Add(previewOpenButton);
 
         var detailPanel = new Panel
         {
@@ -352,14 +395,14 @@ public class CaptureLibraryForm : Form
     private static Image CreateThumbnail(string path)
     {
         using var source = LoadImageCopy(path);
-        var thumb = new Bitmap(168, 104);
+        var thumb = new Bitmap(132, 82);
 
         using var g = Graphics.FromImage(thumb);
         g.Clear(Color.FromArgb(243, 244, 246));
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
-        var scale = Math.Min(150.0 / source.Width, 86.0 / source.Height);
+        var scale = Math.Min(116.0 / source.Width, 64.0 / source.Height);
         var width = Math.Max(1, (int)Math.Round(source.Width * scale));
         var height = Math.Max(1, (int)Math.Round(source.Height * scale));
         var x = (thumb.Width - width) / 2;
@@ -386,6 +429,25 @@ public class CaptureLibraryForm : Form
             return;
 
         Process.Start(new ProcessStartInfo(_selectedPath) { UseShellExecute = true });
+    }
+
+    private void OpenSelectedAsSticky()
+    {
+        if (string.IsNullOrEmpty(_selectedPath) || !File.Exists(_selectedPath))
+            return;
+
+        var image = LoadImageCopy(_selectedPath);
+        var info = CaptureHistoryMetadata.LoadInfo(_selectedPath);
+
+        if (StickyRequested != null)
+        {
+            StickyRequested.Invoke(image, info);
+            return;
+        }
+
+        var sticky = new StickyWindow(image, info, _settings.SaveFolder);
+        image.Dispose();
+        sticky.Show();
     }
 
     private void OpenSelectedFolder()
@@ -420,6 +482,11 @@ public class CaptureLibraryForm : Form
             return;
 
         File.Delete(_selectedPath);
+
+        var metadataPath = CaptureHistoryMetadata.GetPath(_selectedPath);
+        if (File.Exists(metadataPath))
+            File.Delete(metadataPath);
+
         Reload();
     }
 
@@ -437,14 +504,15 @@ public class CaptureLibraryForm : Form
         _folderButton.Enabled = enabled;
         _copyButton.Enabled = enabled;
         _deleteButton.Enabled = enabled;
+        _stickyButton.Enabled = enabled;
     }
 
-    private static Button MakeButton(string text)
+    private static Button MakeButton(string text, int width = 92)
     {
         var button = new Button
         {
             Text = text,
-            Size = new Size(92, 32),
+            Size = new Size(width, 32),
             Margin = new Padding(0, 0, 8, 0),
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(249, 250, 251),
