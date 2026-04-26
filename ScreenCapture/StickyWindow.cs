@@ -148,8 +148,13 @@ public class StickyWindow : Form
             Width - Border * 2, Height - Border * 2);
         g.DrawImage(_originalImage, destRect);
 
-        var tag = _info.Url != null ? "[URL]" : _info.FilePath != null ? "[File]" : "";
-        var tagText = string.IsNullOrEmpty(tag) ? _info.ProcessName : $"{tag} {_info.ProcessName}";
+        var tag = _info.Url != null ? "[URL]" :
+            _info.FilePath != null ? "[File]" :
+            _info.FolderPath != null ? "[Folder]" : "";
+        var sourceCount = _info.Sources.Count > 1 ? $" +{_info.Sources.Count - 1}" : "";
+        var tagText = string.IsNullOrEmpty(tag)
+            ? $"{_info.ProcessName}{sourceCount}"
+            : $"{tag} {_info.ProcessName}{sourceCount}";
         if (!string.IsNullOrEmpty(tagText))
         {
             using var tagFont = new Font("Segoe UI", 8);
@@ -333,13 +338,33 @@ public class StickyWindow : Form
 
     private bool TryOpenSourceAt(Point clientPoint)
     {
-        if (TryForwardClickToSource(clientPoint))
-            return true;
+        if (TryGetSourcePoint(clientPoint, out var screenPoint, out var imagePoint))
+        {
+            var source = FindSourceAt(imagePoint, screenPoint);
+            if (source != null)
+            {
+                if (!string.IsNullOrEmpty(source.Url) && TryOpenSource(source))
+                    return true;
 
+                if (TryForwardClickToWindow(source.Hwnd, screenPoint))
+                    return true;
+
+                if (TryOpenSource(source))
+                    return true;
+            }
+
+            if (TryForwardClickToWindow(_info.SourceHwnd, screenPoint))
+                return true;
+        }
+
+        return TryOpenInfoSource();
+    }
+
+    private bool TryOpenInfoSource()
+    {
         if (!string.IsNullOrEmpty(_info.Url))
         {
-            Process.Start(new ProcessStartInfo(_info.Url) { UseShellExecute = true });
-            return true;
+            return OpenUrlInCapturedBrowser(_info.Url, _info.ExePath, _info.ProcessName);
         }
 
         if (!string.IsNullOrEmpty(_info.FilePath) && File.Exists(_info.FilePath))
@@ -348,38 +373,221 @@ public class StickyWindow : Form
             return true;
         }
 
+        if (!string.IsNullOrEmpty(_info.FolderPath) && Directory.Exists(_info.FolderPath))
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_info.FolderPath}\"") { UseShellExecute = true });
+            return true;
+        }
+
         return false;
     }
 
-    private bool TryForwardClickToSource(Point clientPoint)
+    private bool TryGetSourcePoint(Point clientPoint, out Point screenPoint, out Point imagePoint)
     {
-        if (_info.SourceHwnd == IntPtr.Zero || !IsWindow(_info.SourceHwnd) ||
-            _info.CapturedRegion.Width <= 0 || _info.CapturedRegion.Height <= 0)
+        screenPoint = Point.Empty;
+        imagePoint = Point.Empty;
+
+        if (_info.CapturedRegion.Width <= 0 || _info.CapturedRegion.Height <= 0)
             return false;
 
         var imageRect = GetImageClientRect();
         if (!imageRect.Contains(clientPoint))
             return false;
 
-        var imageX = (int)Math.Round((clientPoint.X - imageRect.X) * (double)_originalImage.Width / imageRect.Width);
-        var imageY = (int)Math.Round((clientPoint.Y - imageRect.Y) * (double)_originalImage.Height / imageRect.Height);
-        var screenPoint = new Point(
-            _info.CapturedRegion.X + Math.Clamp(imageX, 0, _originalImage.Width - 1),
-            _info.CapturedRegion.Y + Math.Clamp(imageY, 0, _originalImage.Height - 1));
-
-        _ = ForwardDoubleClickAsync(screenPoint);
+        imagePoint = new Point(
+            (int)Math.Round((clientPoint.X - imageRect.X) * (double)_originalImage.Width / imageRect.Width),
+            (int)Math.Round((clientPoint.Y - imageRect.Y) * (double)_originalImage.Height / imageRect.Height));
+        screenPoint = new Point(
+            _info.CapturedRegion.X + Math.Clamp(imagePoint.X, 0, _originalImage.Width - 1),
+            _info.CapturedRegion.Y + Math.Clamp(imagePoint.Y, 0, _originalImage.Height - 1));
         return true;
     }
 
-    private async Task ForwardDoubleClickAsync(Point screenPoint)
+    private CaptureSource? FindSourceAt(Point imagePoint, Point screenPoint)
+    {
+        foreach (var source in _info.Sources)
+        {
+            if (source.CaptureBounds.Width > 0 && source.CaptureBounds.Height > 0)
+            {
+                if (source.CaptureBounds.Contains(imagePoint))
+                    return source;
+            }
+            else if (source.WindowBounds.Contains(screenPoint))
+            {
+                return source;
+            }
+        }
+
+        return null;
+    }
+
+    private bool TryForwardClickToWindow(IntPtr hwnd, Point screenPoint)
+    {
+        if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+            return false;
+
+        _ = ForwardDoubleClickAsync(hwnd, screenPoint);
+        return true;
+    }
+
+    private bool TryOpenSource(CaptureSource source)
+    {
+        if (!string.IsNullOrEmpty(source.Url))
+        {
+            return OpenUrlInCapturedBrowser(source.Url, source.ExePath, source.ProcessName);
+        }
+
+        if (!string.IsNullOrEmpty(source.FilePath) && File.Exists(source.FilePath))
+        {
+            Process.Start(new ProcessStartInfo(source.FilePath) { UseShellExecute = true });
+            return true;
+        }
+
+        if (!string.IsNullOrEmpty(source.FolderPath) && Directory.Exists(source.FolderPath))
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{source.FolderPath}\"") { UseShellExecute = true });
+            return true;
+        }
+
+        if (IsLaunchableExeFallback(source) &&
+            !string.IsNullOrEmpty(source.ExePath) &&
+            File.Exists(source.ExePath))
+        {
+            Process.Start(new ProcessStartInfo(source.ExePath) { UseShellExecute = true });
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool OpenUrlInCapturedBrowser(string url, string? exePath, string processName)
+    {
+        try
+        {
+            var browserPath = ResolveBrowserPath(exePath, processName);
+            if (!string.IsNullOrEmpty(browserPath))
+            {
+                var browserName = GetBrowserName(processName, browserPath);
+                var psi = new ProcessStartInfo(browserPath)
+                {
+                    UseShellExecute = false
+                };
+
+                if (browserName == "firefox")
+                    psi.ArgumentList.Add("-new-window");
+                else
+                    psi.ArgumentList.Add("--new-window");
+
+                psi.ArgumentList.Add(url);
+                Process.Start(psi);
+                return true;
+            }
+
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string? ResolveBrowserPath(string? exePath, string processName)
+    {
+        if (!string.IsNullOrWhiteSpace(exePath) &&
+            File.Exists(exePath) &&
+            IsKnownBrowser(GetBrowserName(processName, exePath)))
+        {
+            return exePath;
+        }
+
+        var browserName = GetBrowserName(processName, exePath);
+        foreach (var candidate in GetBrowserPathCandidates(browserName))
+        {
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    private static string GetBrowserName(string? processName, string? exePath)
+    {
+        var name = !string.IsNullOrWhiteSpace(processName)
+            ? processName
+            : Path.GetFileNameWithoutExtension(exePath ?? "");
+
+        return name.ToLowerInvariant();
+    }
+
+    private static bool IsKnownBrowser(string browserName) =>
+        browserName is "chrome" or "msedge" or "firefox" or "brave" or "opera" or "whale" or "vivaldi";
+
+    private static IEnumerable<string> GetBrowserPathCandidates(string browserName)
+    {
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
+        return browserName switch
+        {
+            "brave" => new[]
+            {
+                Path.Combine(programFiles, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                Path.Combine(programFilesX86, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                Path.Combine(localAppData, "BraveSoftware", "Brave-Browser", "Application", "brave.exe")
+            },
+            "chrome" => new[]
+            {
+                Path.Combine(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
+                Path.Combine(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),
+                Path.Combine(localAppData, "Google", "Chrome", "Application", "chrome.exe")
+            },
+            "msedge" => new[]
+            {
+                Path.Combine(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
+                Path.Combine(programFiles, "Microsoft", "Edge", "Application", "msedge.exe")
+            },
+            "firefox" => new[]
+            {
+                Path.Combine(programFiles, "Mozilla Firefox", "firefox.exe"),
+                Path.Combine(programFilesX86, "Mozilla Firefox", "firefox.exe")
+            },
+            "opera" => new[]
+            {
+                Path.Combine(localAppData, "Programs", "Opera", "opera.exe")
+            },
+            "whale" => new[]
+            {
+                Path.Combine(programFiles, "Naver", "Naver Whale", "Application", "whale.exe"),
+                Path.Combine(programFilesX86, "Naver", "Naver Whale", "Application", "whale.exe"),
+                Path.Combine(localAppData, "Naver", "Naver Whale", "Application", "whale.exe")
+            },
+            "vivaldi" => new[]
+            {
+                Path.Combine(programFiles, "Vivaldi", "Application", "vivaldi.exe"),
+                Path.Combine(programFilesX86, "Vivaldi", "Application", "vivaldi.exe"),
+                Path.Combine(localAppData, "Vivaldi", "Application", "vivaldi.exe")
+            },
+            _ => Array.Empty<string>()
+        };
+    }
+
+    private static bool IsLaunchableExeFallback(CaptureSource source)
+    {
+        var process = source.ProcessName.ToLowerInvariant();
+        return process is not ("applicationframehost" or "dllhost");
+    }
+
+    private async Task ForwardDoubleClickAsync(IntPtr hwnd, Point screenPoint)
     {
         _dragging = false;
         TopMost = false;
         if (_topMostItem != null)
             _topMostItem.Checked = false;
 
-        ShowWindow(_info.SourceHwnd, SW_RESTORE);
-        SetForegroundWindow(_info.SourceHwnd);
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
         await Task.Delay(120);
 
         SetCursorPos(screenPoint.X, screenPoint.Y);
@@ -474,7 +682,18 @@ public class StickyWindow : Form
                 {
                     ProcessName = _info.ProcessName,
                     WindowTitle = "배경 제거 결과",
-                    CapturedImagePath = savePath
+                    Url = _info.Url,
+                    FilePath = _info.FilePath,
+                    FolderPath = _info.FolderPath,
+                    ExePath = _info.ExePath,
+                    ClipboardText = _info.ClipboardText,
+                    OcrText = _info.OcrText,
+                    CapturedImagePath = savePath,
+                    CapturedRegion = _info.CapturedRegion,
+                    SourceHwnd = _info.SourceHwnd,
+                    SourceKind = _info.SourceKind,
+                    SourceAnchor = _info.SourceAnchor,
+                    Sources = CaptureInfo.CloneSources(_info.Sources)
                 };
                 NewStickyRequested?.Invoke(new Bitmap(newImg), nobgInfo);
 
@@ -604,7 +823,7 @@ public class StickyWindow : Form
         if (!string.IsNullOrEmpty(_info.Url))
         {
             var item = menu.Items.Add("링크 열기", null, (_, _) =>
-                Process.Start(new ProcessStartInfo(_info.Url) { UseShellExecute = true }));
+                OpenUrlInCapturedBrowser(_info.Url, _info.ExePath, _info.ProcessName));
             item.Font = new Font(menu.Font, FontStyle.Bold);
         }
 
@@ -616,6 +835,14 @@ public class StickyWindow : Form
                 fileItem.Font = new Font(menu.Font, FontStyle.Bold);
             menu.Items.Add("위치 열기", null, (_, _) =>
                 Process.Start("explorer.exe", $"/select,\"{_info.FilePath}\""));
+        }
+
+        if (!string.IsNullOrEmpty(_info.FolderPath) && Directory.Exists(_info.FolderPath))
+        {
+            var folderItem = menu.Items.Add("폴더 열기", null, (_, _) =>
+                Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_info.FolderPath}\"") { UseShellExecute = true }));
+            if (string.IsNullOrEmpty(_info.Url) && string.IsNullOrEmpty(_info.FilePath))
+                folderItem.Font = new Font(menu.Font, FontStyle.Bold);
         }
 
         // Captured image path

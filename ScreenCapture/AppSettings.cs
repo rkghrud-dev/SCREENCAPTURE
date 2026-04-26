@@ -58,6 +58,7 @@ public class AppSettings
     // --- Save ---
     public string SaveFolder { get; set; } =
         Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+    public bool AutoSaveCaptures { get; set; } = true;
     public string ImageFormat { get; set; } = "JPG";   // JPG, PNG, BMP
     public int JpegQuality { get; set; } = 95;         // 1-100
     public string FileNamePattern { get; set; } = "yyyyMMddHHmmss";  // DateTime format
@@ -114,4 +115,7 @@ public class AppSettings
         "BMP" => ".bmp",
         _ => ".jpg"
     };
+
+    public string GetHistoryRoot() =>
+        Path.Combine(SaveFolder, "ScreenCapture History");
 }

@@ -438,12 +438,15 @@ public class AiToolsForm : Form
             WindowTitle = title,
             Url = _info.Url,
             FilePath = _info.FilePath,
+            FolderPath = _info.FolderPath,
+            ExePath = _info.ExePath,
             ClipboardText = _info.ClipboardText,
             CapturedImagePath = path,
             CapturedRegion = _info.CapturedRegion,
             SourceHwnd = _info.SourceHwnd,
             SourceKind = _info.SourceKind,
-            SourceAnchor = _info.SourceAnchor
+            SourceAnchor = _info.SourceAnchor,
+            Sources = CaptureInfo.CloneSources(_info.Sources)
         };
 
         NewStickyRequested?.Invoke(new Bitmap(result), newInfo);

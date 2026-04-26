@@ -21,6 +21,7 @@ public class SettingsForm : Form
 
     // --- Save ---
     private TextBox _txtFolder = null!;
+    private CheckBox _chkAutoSaveCaptures = null!;
     private ComboBox _cmbFormat = null!;
     private TrackBar _trkQuality = null!;
     private Label _lblQuality = null!;
@@ -182,6 +183,18 @@ public class SettingsForm : Form
         int y = 10;
 
         AddGroupLabel(p, "저장 설정", ref y);
+
+        _chkAutoSaveCaptures = AddCheck(p, "캡쳐 자동 저장(날짜별 보관함)", 20, ref y);
+        var lblAutoSave = new Label
+        {
+            Text = "보관함에서 어제/그제 작업을 날짜별로 다시 찾을 수 있습니다.",
+            Location = new Point(40, y - 5),
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8.5f)
+        };
+        p.Controls.Add(lblAutoSave);
+        y += 24;
 
         // Folder
         var lblFolder = new Label { Text = "저장 폴더:", Location = new Point(20, y + 3), AutoSize = true };
@@ -419,6 +432,7 @@ public class SettingsForm : Form
 
         // Save
         _txtFolder.Text = s.SaveFolder;
+        _chkAutoSaveCaptures.Checked = s.AutoSaveCaptures;
         _cmbFormat.SelectedItem = s.ImageFormat;
         _trkQuality.Value = Math.Clamp(s.JpegQuality, 10, 100);
         _lblQuality.Text = $"{_trkQuality.Value}%";
@@ -469,6 +483,7 @@ public class SettingsForm : Form
 
         // Save
         Result.SaveFolder = _txtFolder.Text;
+        Result.AutoSaveCaptures = _chkAutoSaveCaptures.Checked;
         Result.ImageFormat = _cmbFormat.SelectedItem?.ToString() ?? "JPG";
         Result.JpegQuality = _trkQuality.Value;
         Result.FileNamePattern = _txtFilePattern.Text;

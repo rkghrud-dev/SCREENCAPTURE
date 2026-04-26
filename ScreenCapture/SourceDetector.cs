@@ -10,6 +10,23 @@ public static class SourceDetector
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetShellWindow();
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int maxCount);
 
@@ -23,13 +40,31 @@ public static class SourceDetector
     private static extern void GetActiveObject(ref Guid rclsid, IntPtr pvReserved,
         [MarshalAs(UnmanagedType.IUnknown)] out object ppunk);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
     private static readonly string[] Browsers =
         { "chrome", "msedge", "firefox", "brave", "opera", "whale", "vivaldi" };
 
     private static readonly string[] OfficeProcesses =
         { "excel", "winword", "powerpnt", "hwp", "hwpviewer" };
 
-    public record WindowSnapshot(IntPtr Hwnd, string ProcessName, string Title, string? ExePath);
+    private const int ForegroundBrowserUrlTimeoutMs = 3000;
+    private const int BackgroundBrowserUrlTimeoutMs = 900;
+    private const int MaxBackgroundBrowserUrlLookups = 4;
+
+    public record WindowSnapshot(
+        IntPtr Hwnd,
+        string ProcessName,
+        string Title,
+        string? ExePath,
+        Rectangle WindowBounds);
 
     public static WindowSnapshot SnapshotForeground()
     {
@@ -50,34 +85,59 @@ public static class SourceDetector
         }
         catch { }
 
-        return new WindowSnapshot(hwnd, processName, title, exePath);
+        return new WindowSnapshot(hwnd, processName, title, exePath, GetWindowBounds(hwnd));
+    }
+
+    public static List<WindowSnapshot> SnapshotVisibleWindows()
+    {
+        var result = new List<WindowSnapshot>();
+        var shellWindow = GetShellWindow();
+        var currentPid = Environment.ProcessId;
+
+        EnumWindows((hwnd, _) =>
+        {
+            if (hwnd == IntPtr.Zero || hwnd == shellWindow || !IsWindowVisible(hwnd))
+                return true;
+
+            if (IsCloaked(hwnd))
+                return true;
+
+            var bounds = GetWindowBounds(hwnd);
+            if (bounds.Width < 30 || bounds.Height < 30)
+                return true;
+
+            var sb = new StringBuilder(512);
+            GetWindowText(hwnd, sb, 512);
+            var title = sb.ToString();
+
+            string processName = "";
+            string? exePath = null;
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid == currentPid)
+                return true;
+
+            try
+            {
+                var proc = Process.GetProcessById((int)pid);
+                processName = proc.ProcessName;
+                try { exePath = proc.MainModule?.FileName; } catch { }
+            }
+            catch { }
+
+            if (string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(processName))
+                return true;
+
+            result.Add(new WindowSnapshot(hwnd, processName, title, exePath, bounds));
+            return true;
+        }, IntPtr.Zero);
+
+        return result;
     }
 
     public static CaptureInfo Analyze(WindowSnapshot snapshot)
     {
-        var info = new CaptureInfo
-        {
-            ProcessName = snapshot.ProcessName,
-            WindowTitle = snapshot.Title,
-            SourceHwnd = snapshot.Hwnd
-        };
-
-        var isBrowser = Array.Exists(Browsers,
-            b => snapshot.ProcessName.Equals(b, StringComparison.OrdinalIgnoreCase));
-
-        if (isBrowser)
-        {
-            info.Url = GetBrowserUrlSafe(snapshot.Hwnd);
-        }
-        else
-        {
-            info.FilePath = FindOfficeFilePath(snapshot) ?? FindFilePath(snapshot);
-            if (info.FilePath != null)
-            {
-                info.SourceKind = IsOfficeLike(snapshot.ProcessName) ? "Document" : "File";
-                info.SourceAnchor = Path.GetFileName(info.FilePath);
-            }
-        }
+        var source = AnalyzeSource(snapshot, Rectangle.Empty, includeDeepMetadata: true);
+        var info = ToCaptureInfo(source);
 
         try
         {
@@ -89,12 +149,178 @@ public static class SourceDetector
         return info;
     }
 
-    private static string? GetBrowserUrlSafe(IntPtr hwnd)
+    public static CaptureInfo Analyze(
+        WindowSnapshot foreground,
+        IEnumerable<WindowSnapshot> visibleWindows,
+        Rectangle capturedRegion)
+    {
+        var info = Analyze(foreground);
+        info.Sources = AnalyzeSources(visibleWindows, capturedRegion, foreground.Hwnd);
+
+        var primarySource = info.Sources.FirstOrDefault(s => s.Hwnd == foreground.Hwnd)
+                            ?? info.Sources.FirstOrDefault();
+        if (primarySource != null)
+            ApplyPrimarySource(info, primarySource);
+
+        return info;
+    }
+
+    public static List<CaptureSource> AnalyzeSources(
+        IEnumerable<WindowSnapshot> visibleWindows,
+        Rectangle capturedRegion,
+        IntPtr foregroundHwnd)
+    {
+        if (capturedRegion.Width <= 0 || capturedRegion.Height <= 0)
+            return new List<CaptureSource>();
+
+        var sources = new List<CaptureSource>();
+        var backgroundBrowserUrlLookups = 0;
+        foreach (var snapshot in visibleWindows)
+        {
+            var intersection = Rectangle.Intersect(snapshot.WindowBounds, capturedRegion);
+            if (intersection.Width < 6 || intersection.Height < 6)
+                continue;
+
+            var isForeground = snapshot.Hwnd == foregroundHwnd;
+            var isBrowser = IsBrowserLike(snapshot.ProcessName);
+            var shouldReadMetadata = isForeground || IsExplorerLike(snapshot.ProcessName);
+            var browserUrlTimeoutMs = ForegroundBrowserUrlTimeoutMs;
+
+            if (isBrowser && !isForeground && backgroundBrowserUrlLookups < MaxBackgroundBrowserUrlLookups)
+            {
+                shouldReadMetadata = true;
+                browserUrlTimeoutMs = BackgroundBrowserUrlTimeoutMs;
+                backgroundBrowserUrlLookups++;
+            }
+
+            var source = AnalyzeSource(
+                snapshot,
+                capturedRegion,
+                shouldReadMetadata,
+                browserUrlTimeoutMs);
+            source.CaptureBounds = new Rectangle(
+                intersection.X - capturedRegion.X,
+                intersection.Y - capturedRegion.Y,
+                intersection.Width,
+                intersection.Height);
+            sources.Add(source);
+        }
+
+        return sources;
+    }
+
+    private static CaptureSource AnalyzeSource(
+        WindowSnapshot snapshot,
+        Rectangle capturedRegion,
+        bool includeDeepMetadata,
+        int browserUrlTimeoutMs = ForegroundBrowserUrlTimeoutMs)
+    {
+        var source = new CaptureSource
+        {
+            Hwnd = snapshot.Hwnd,
+            ProcessName = snapshot.ProcessName,
+            WindowTitle = snapshot.Title,
+            ExePath = snapshot.ExePath,
+            WindowBounds = snapshot.WindowBounds
+        };
+
+        if (capturedRegion.Width > 0 && capturedRegion.Height > 0)
+        {
+            var intersection = Rectangle.Intersect(snapshot.WindowBounds, capturedRegion);
+            source.CaptureBounds = new Rectangle(
+                intersection.X - capturedRegion.X,
+                intersection.Y - capturedRegion.Y,
+                intersection.Width,
+                intersection.Height);
+        }
+
+        var isBrowser = IsBrowserLike(snapshot.ProcessName);
+
+        if (isBrowser && includeDeepMetadata)
+        {
+            source.Url = GetBrowserUrlSafe(snapshot.Hwnd, browserUrlTimeoutMs);
+            if (!string.IsNullOrEmpty(source.Url))
+            {
+                source.SourceKind = "Url";
+                source.SourceAnchor = source.Url;
+            }
+        }
+        else if (IsExplorerLike(snapshot.ProcessName))
+        {
+            source.FolderPath = FindExplorerFolderPath(snapshot);
+            if (!string.IsNullOrWhiteSpace(source.FolderPath))
+            {
+                source.SourceKind = "Folder";
+                source.SourceAnchor = source.FolderPath;
+            }
+        }
+        else
+        {
+            source.FilePath = FindOfficeFilePath(snapshot) ?? FindFilePath(snapshot);
+            if (source.FilePath != null)
+            {
+                source.SourceKind = IsOfficeLike(snapshot.ProcessName) ? "Document" : "File";
+                source.SourceAnchor = Path.GetFileName(source.FilePath);
+            }
+        }
+
+        return source;
+    }
+
+    private static CaptureInfo ToCaptureInfo(CaptureSource source) =>
+        new()
+        {
+            ProcessName = source.ProcessName,
+            WindowTitle = source.WindowTitle,
+            Url = source.Url,
+            FilePath = source.FilePath,
+            FolderPath = source.FolderPath,
+            ExePath = source.ExePath,
+            SourceHwnd = source.Hwnd,
+            SourceKind = source.SourceKind,
+            SourceAnchor = source.SourceAnchor
+        };
+
+    private static void ApplyPrimarySource(CaptureInfo info, CaptureSource source)
+    {
+        info.ProcessName = source.ProcessName;
+        info.WindowTitle = source.WindowTitle;
+        info.Url = source.Url;
+        info.FilePath = source.FilePath;
+        info.FolderPath = source.FolderPath;
+        info.ExePath = source.ExePath;
+        info.SourceHwnd = source.Hwnd;
+        info.SourceKind = source.SourceKind;
+        info.SourceAnchor = source.SourceAnchor;
+    }
+
+    private static Rectangle GetWindowBounds(IntPtr hwnd)
+    {
+        if (!GetWindowRect(hwnd, out var rect))
+            return Rectangle.Empty;
+
+        return Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+    }
+
+    private static bool IsCloaked(IntPtr hwnd)
+    {
+        try
+        {
+            return DwmGetWindowAttribute(hwnd, 14, out var cloaked, Marshal.SizeOf<int>()) == 0 &&
+                   cloaked != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string? GetBrowserUrlSafe(IntPtr hwnd, int timeoutMs = ForegroundBrowserUrlTimeoutMs)
     {
         try
         {
             var task = Task.Run(() => GetBrowserUrl(hwnd));
-            return task.Wait(TimeSpan.FromSeconds(3)) ? task.Result : null;
+            return task.Wait(TimeSpan.FromMilliseconds(timeoutMs)) ? task.Result : null;
         }
         catch { return null; }
     }
@@ -133,6 +359,145 @@ public static class SourceDetector
     private static bool LooksLikeDomain(string s) =>
         s.Length < 256 && s.Contains('.') && !s.Contains(' ') &&
         !s.StartsWith(".") && !s.EndsWith(".");
+
+    private static string? FindExplorerFolderPath(WindowSnapshot snapshot)
+    {
+        if (!IsExplorerLike(snapshot.ProcessName))
+            return null;
+
+        object? shell = null;
+        object? windows = null;
+
+        try
+        {
+            var shellType = Type.GetTypeFromProgID("Shell.Application");
+            if (shellType == null) return null;
+
+            shell = Activator.CreateInstance(shellType);
+            if (shell == null) return null;
+
+            windows = shell.GetType().InvokeMember("Windows",
+                System.Reflection.BindingFlags.InvokeMethod, null, shell, null);
+            if (windows == null) return null;
+
+            var countObj = windows.GetType().InvokeMember("Count",
+                System.Reflection.BindingFlags.GetProperty, null, windows, null);
+            var count = Convert.ToInt32(countObj);
+
+            for (var i = 0; i < count; i++)
+            {
+                object? window = null;
+                try
+                {
+                    window = windows.GetType().InvokeMember("Item",
+                        System.Reflection.BindingFlags.InvokeMethod, null, windows, new object[] { i });
+                    if (window == null) continue;
+
+                    var hwndObj = window.GetType().InvokeMember("HWND",
+                        System.Reflection.BindingFlags.GetProperty, null, window, null);
+                    if (!HwndMatches(hwndObj, snapshot.Hwnd))
+                        continue;
+
+                    var locationUrl = window.GetType().InvokeMember("LocationURL",
+                        System.Reflection.BindingFlags.GetProperty, null, window, null) as string;
+                    var path = FileUrlToPath(locationUrl);
+                    if (!string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
+                        return path;
+
+                    path = TryGetShellFolderPath(window);
+                    if (!string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
+                        return path;
+                }
+                catch { }
+                finally
+                {
+                    ReleaseComObject(window);
+                }
+            }
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            ReleaseComObject(windows);
+            ReleaseComObject(shell);
+        }
+
+        return null;
+    }
+
+    private static bool HwndMatches(object? candidate, IntPtr expected)
+    {
+        if (candidate == null)
+            return false;
+
+        try
+        {
+            var candidateValue = Convert.ToInt64(candidate);
+            var expectedValue = expected.ToInt64();
+            if (candidateValue == expectedValue)
+                return true;
+
+            return unchecked((uint)candidateValue) == unchecked((uint)expectedValue);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string? FileUrlToPath(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) ||
+            !url.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        try
+        {
+            return new Uri(url).LocalPath;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryGetShellFolderPath(object window)
+    {
+        object? document = null;
+        object? folder = null;
+        object? self = null;
+
+        try
+        {
+            document = window.GetType().InvokeMember("Document",
+                System.Reflection.BindingFlags.GetProperty, null, window, null);
+            if (document == null) return null;
+
+            folder = document.GetType().InvokeMember("Folder",
+                System.Reflection.BindingFlags.GetProperty, null, document, null);
+            if (folder == null) return null;
+
+            self = folder.GetType().InvokeMember("Self",
+                System.Reflection.BindingFlags.GetProperty, null, folder, null);
+            if (self == null) return null;
+
+            return self.GetType().InvokeMember("Path",
+                System.Reflection.BindingFlags.GetProperty, null, self, null) as string;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            ReleaseComObject(self);
+            ReleaseComObject(folder);
+            ReleaseComObject(document);
+        }
+    }
 
     private static string? FindFilePath(WindowSnapshot snapshot)
     {
@@ -245,6 +610,8 @@ public static class SourceDetector
             return new[] { ".pptx", ".pptm", ".ppt" };
         if (process is "hwp" or "hwpviewer")
             return new[] { ".hwp", ".hwpx" };
+        if (IsImageViewerLike(process))
+            return new[] { ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".heic" };
 
         return Array.Empty<string>();
     }
@@ -308,4 +675,17 @@ public static class SourceDetector
 
     private static bool IsOfficeLike(string processName) =>
         OfficeProcesses.Contains(processName.ToLowerInvariant());
+
+    private static bool IsExplorerLike(string processName) =>
+        processName.Equals("explorer", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsBrowserLike(string processName) =>
+        Array.Exists(Browsers, b => processName.Equals(b, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsImageViewerLike(string processName)
+    {
+        var process = processName.ToLowerInvariant();
+        return process is "photos" or "photoviewer" ||
+               process.Contains("photo") || process.Contains("image");
+    }
 }
