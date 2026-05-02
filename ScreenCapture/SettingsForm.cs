@@ -41,6 +41,9 @@ public class SettingsForm : Form
     private TextBox _txtKeyC = null!;
     private Keys _keyC;
     private ComboBox _cmbActionC = null!;
+    private CheckBox _chkCtrlD = null!, _chkShiftD = null!, _chkAltD = null!;
+    private TextBox _txtKeyD = null!;
+    private Keys _keyD;
 
     public AppSettings Result { get; private set; }
 
@@ -49,7 +52,7 @@ public class SettingsForm : Form
         Result = current.Clone();
 
         Text = "Options";
-        Size = new Size(560, 420);
+        Size = new Size(560, 500);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -61,7 +64,7 @@ public class SettingsForm : Form
         _navList = new ListBox
         {
             Location = new Point(0, 0),
-            Size = new Size(120, 340),
+            Size = new Size(120, 420),
             BorderStyle = BorderStyle.None,
             BackColor = Color.FromArgb(245, 245, 245),
             Font = new Font("Segoe UI", 10),
@@ -77,7 +80,7 @@ public class SettingsForm : Form
         _contentPanel = new Panel
         {
             Location = new Point(121, 0),
-            Size = new Size(423, 340),
+            Size = new Size(423, 420),
             BorderStyle = BorderStyle.None
         };
         Controls.Add(_contentPanel);
@@ -86,7 +89,7 @@ public class SettingsForm : Form
         var sep = new Label
         {
             Location = new Point(120, 0),
-            Size = new Size(1, 340),
+            Size = new Size(1, 420),
             BackColor = Color.FromArgb(220, 220, 220)
         };
         Controls.Add(sep);
@@ -95,7 +98,7 @@ public class SettingsForm : Form
         var btnOk = new Button
         {
             Text = "확인(O)",
-            Location = new Point(340, 350),
+            Location = new Point(340, 430),
             Size = new Size(90, 30),
             DialogResult = DialogResult.OK
         };
@@ -105,7 +108,7 @@ public class SettingsForm : Form
         var btnCancel = new Button
         {
             Text = "취소(C)",
-            Location = new Point(440, 350),
+            Location = new Point(440, 430),
             Size = new Size(90, 30),
             DialogResult = DialogResult.Cancel
         };
@@ -408,6 +411,34 @@ public class SettingsForm : Form
         };
         _cmbActionC.Items.AddRange(ActionLabels);
         p.Controls.Add(_cmbActionC);
+        y += 45;
+
+        var lblD = new Label
+        {
+            Text = "상세 편집 캡쳐",
+            Location = new Point(20, y),
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold)
+        };
+        p.Controls.Add(lblD);
+        y += 25;
+
+        _chkCtrlD = AddModCheck(p, "Ctrl", 20, y);
+        _chkShiftD = AddModCheck(p, "Shift", 80, y);
+        _chkAltD = AddModCheck(p, "Alt", 145, y);
+        var lblPlus4 = new Label { Text = "+", Location = new Point(192, y + 3), AutoSize = true };
+        p.Controls.Add(lblPlus4);
+        _txtKeyD = AddKeyBox(p, 210, y);
+
+        var lblDetail = new Label
+        {
+            Text = "캡쳐 후 현재 화면 위에서 도형/텍스트 편집기를 엽니다.",
+            Location = new Point(20, y + 32),
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8.5f)
+        };
+        p.Controls.Add(lblDetail);
 
         return p;
     }
@@ -460,6 +491,12 @@ public class SettingsForm : Form
         _keyC = s.HotkeyC.GetKey();
         _txtKeyC.Text = s.HotkeyC.Key;
         _cmbActionC.SelectedIndex = (int)s.ActionC;
+
+        _chkCtrlD.Checked = s.HotkeyD.Ctrl;
+        _chkShiftD.Checked = s.HotkeyD.Shift;
+        _chkAltD.Checked = s.HotkeyD.Alt;
+        _keyD = s.HotkeyD.GetKey();
+        _txtKeyD.Text = s.HotkeyD.Key;
     }
 
     private void BtnSave_Click(object? sender, EventArgs e)
@@ -513,6 +550,13 @@ public class SettingsForm : Form
             Key = _keyC.ToString()
         };
         Result.ActionC = (CaptureAction)_cmbActionC.SelectedIndex;
+        Result.HotkeyD = new HotkeyConfig
+        {
+            Ctrl = _chkCtrlD.Checked,
+            Shift = _chkShiftD.Checked,
+            Alt = _chkAltD.Checked,
+            Key = _keyD.ToString()
+        };
     }
 
     private static void ApplyStartup(bool enable)
@@ -670,5 +714,6 @@ public class SettingsForm : Form
         if (txt == _txtKeyA) _keyA = e.KeyCode;
         else if (txt == _txtKeyB) _keyB = e.KeyCode;
         else if (txt == _txtKeyC) _keyC = e.KeyCode;
+        else if (txt == _txtKeyD) _keyD = e.KeyCode;
     }
 }

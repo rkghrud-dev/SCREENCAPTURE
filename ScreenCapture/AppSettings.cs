@@ -70,6 +70,7 @@ public class AppSettings
     public CaptureAction ActionB { get; set; } = CaptureAction.FileAndClipboard;
     public HotkeyConfig HotkeyC { get; set; } = new() { Ctrl = true, Shift = true, Alt = false, Key = "S" };
     public CaptureAction ActionC { get; set; } = CaptureAction.FileAndClipboard;
+    public HotkeyConfig HotkeyD { get; set; } = new() { Ctrl = true, Shift = true, Alt = false, Key = "D" };
 
     // --- Persistence ---
 

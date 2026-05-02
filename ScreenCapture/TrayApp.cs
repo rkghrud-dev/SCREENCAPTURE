@@ -11,6 +11,7 @@ public class TrayApp : ApplicationContext
     private const int HOTKEY_A = 1;
     private const int HOTKEY_B = 2;
     private const int HOTKEY_C = 3;
+    private const int HOTKEY_D = 4;
 
     private readonly NotifyIcon _tray;
     private readonly HotkeyWindow _hotkey;
@@ -60,6 +61,7 @@ public class TrayApp : ApplicationContext
             $"{_settings.HotkeyA.ToDisplayString()} : 캡쳐 → 클립보드\n" +
             $"{_settings.HotkeyB.ToDisplayString()} : 캡쳐 → 파일 + 경로\n" +
             $"{_settings.HotkeyC.ToDisplayString()} : 스티키 캡쳐\n" +
+            $"{_settings.HotkeyD.ToDisplayString()} : 상세 캡쳐 편집\n" +
             $"저장: {_settings.SaveFolder}",
             ToolTipIcon.Info);
     }
@@ -74,8 +76,10 @@ public class TrayApp : ApplicationContext
             _settings.HotkeyB.GetModifiers(), _settings.HotkeyB.GetKey());
         var okC = _hotkey.Register(HOTKEY_C,
             _settings.HotkeyC.GetModifiers(), _settings.HotkeyC.GetKey());
+        var okD = _hotkey.Register(HOTKEY_D,
+            _settings.HotkeyD.GetModifiers(), _settings.HotkeyD.GetKey());
 
-        if (!okA || !okB || !okC)
+        if (!okA || !okB || !okC || !okD)
         {
             _tray.ShowBalloonTip(3000, "경고",
                 "일부 단축키를 등록할 수 없습니다.\n다른 프로그램이 사용 중일 수 있습니다.",
@@ -126,6 +130,12 @@ public class TrayApp : ApplicationContext
             CreateMenuIcon(MenuSuccess, MenuIconKind.Pin),
             (_, _) => DoCapture(_settings.ActionC, forcePin: true),
             _settings.HotkeyC.ToDisplayString()));
+        captureMenu.DropDownItems.Add(MakeMenuItem(
+            "상세 캡쳐 편집",
+            "캡쳐 후 형광펜, 도형, 텍스트를 추가합니다.",
+            CreateMenuIcon(MenuAccent, MenuIconKind.Edit),
+            (_, _) => DoDetailedCapture(),
+            _settings.HotkeyD.ToDisplayString()));
         captureMenu.DropDownItems.Add(new ToolStripSeparator());
         captureMenu.DropDownItems.Add(MakeMenuItem(
             "마지막 영역 다시 캡쳐",
@@ -273,6 +283,7 @@ public class TrayApp : ApplicationContext
         Help,
         Info,
         Settings,
+        Edit,
         Exit
     }
 
@@ -337,6 +348,13 @@ public class TrayApp : ApplicationContext
                 g.FillEllipse(fill, 11, 7, 4, 4);
                 g.DrawLine(pen, 4, 13, 14, 13);
                 g.FillEllipse(fill, 5, 11, 4, 4);
+                break;
+
+            case MenuIconKind.Edit:
+                g.DrawRectangle(pen, 3, 4, 12, 10);
+                g.DrawLine(pen, 6, 11, 12, 5);
+                g.DrawLine(pen, 11, 5, 13, 7);
+                g.FillEllipse(fill, 5, 10, 3, 3);
                 break;
 
             case MenuIconKind.Exit:
@@ -418,6 +436,7 @@ public class TrayApp : ApplicationContext
         if (id == HOTKEY_A) DoCapture(_settings.ActionA);
         else if (id == HOTKEY_B) DoCapture(_settings.ActionB);
         else if (id == HOTKEY_C) DoCapture(_settings.ActionC, forcePin: true);
+        else if (id == HOTKEY_D) DoDetailedCapture();
     }
 
     private Rectangle _lastRegion;
@@ -459,6 +478,37 @@ public class TrayApp : ApplicationContext
 
         if (_settings.PinToDesktop || forcePin)
             ShowSticky(img, info);
+    }
+
+    private async void DoDetailedCapture()
+    {
+        if (_settings.CaptureDelay > 0)
+            await Task.Delay(_settings.CaptureDelay);
+
+        var snapshot = SourceDetector.SnapshotForeground();
+        var visibleWindows = SourceDetector.SnapshotVisibleWindows();
+
+        using var overlay = new SelectionOverlay();
+        if (overlay.ShowDialog() != DialogResult.OK) return;
+
+        using var img = overlay.GetSelectedImage();
+        if (img == null) return;
+
+        _lastRegion = overlay.SelectedRegion;
+
+        if (_settings.IncludeCursor)
+            DrawCursorOnImage(img, _lastRegion);
+
+        if (_settings.PlaySound)
+            SystemSounds.Exclamation.Play();
+
+        var info = SourceDetector.Analyze(snapshot, visibleWindows, _lastRegion);
+        info.CapturedRegion = _lastRegion;
+
+        if (_settings.EnableOcr)
+            info.OcrText = await OcrHelper.ExtractTextAsync(img);
+
+        ShowCaptureEditor(img, info);
     }
 
     private async void RepeatLastCapture()
@@ -574,6 +624,14 @@ public class TrayApp : ApplicationContext
         sticky.Show();
     }
 
+    private void ShowCaptureEditor(Bitmap img, CaptureInfo info)
+    {
+        var editor = new CaptureEditorForm(img, info, _settings.SaveFolder);
+        editor.NewStickyRequested += (newImg, newInfo) => ShowSticky(newImg, newInfo);
+        editor.CapturesSaved += RefreshLibraryIfOpen;
+        editor.Show();
+    }
+
     private void CloseAllStickies()
     {
         foreach (var s in _stickyWindows.ToList())
@@ -642,6 +700,7 @@ public class TrayApp : ApplicationContext
                 $"{_settings.HotkeyA.ToDisplayString()} : 클립보드\n" +
                 $"{_settings.HotkeyB.ToDisplayString()} : 파일 + 경로\n" +
                 $"{_settings.HotkeyC.ToDisplayString()} : 스티키\n" +
+                $"{_settings.HotkeyD.ToDisplayString()} : 상세 편집\n" +
                 $"폴더: {_settings.SaveFolder}",
                 ToolTipIcon.Info);
         }
@@ -678,9 +737,11 @@ public class TrayApp : ApplicationContext
             "Screen Capture 사용법\n\n" +
             $"단축키 A: {_settings.HotkeyA.ToDisplayString()} - {DescribeAction(_settings.ActionA)}\n" +
             $"단축키 B: {_settings.HotkeyB.ToDisplayString()} - {DescribeAction(_settings.ActionB)}\n" +
-            $"스티키 C: {_settings.HotkeyC.ToDisplayString()} - {DescribeAction(_settings.ActionC)} + 스티키 표시\n\n" +
+            $"스티키 C: {_settings.HotkeyC.ToDisplayString()} - {DescribeAction(_settings.ActionC)} + 스티키 표시\n" +
+            $"상세 편집: {_settings.HotkeyD.ToDisplayString()} - 캡쳐 후 도형/텍스트 편집\n\n" +
             "기본 조작\n" +
             "- 캡쳐: 단축키를 누른 뒤 원하는 영역 드래그\n" +
+            "- 상세 편집: 캡쳐 위치 위에서 형광펜, 펜, 도형, 텍스트를 추가\n" +
             "- 정밀 선택: Shift를 누른 상태로 확대경 사용\n" +
             "- 마지막 영역 반복: 트레이 메뉴 > 마지막 캡쳐 영역 반복\n\n" +
             "스티키 창\n" +

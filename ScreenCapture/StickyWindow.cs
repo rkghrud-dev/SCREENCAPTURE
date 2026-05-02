@@ -752,6 +752,16 @@ public class StickyWindow : Form
         form.Show(this);
     }
 
+    private void OpenCaptureEditor()
+    {
+        var form = new CaptureEditorForm(_originalImage, _info, _saveFolder)
+        {
+            TopMost = TopMost
+        };
+        form.NewStickyRequested += (newImg, newInfo) => NewStickyRequested?.Invoke(newImg, newInfo);
+        form.Show(this);
+    }
+
     private async void OpenInChatGpt()
     {
         try
@@ -880,6 +890,8 @@ public class StickyWindow : Form
         menu.Items.Add(addOnMenu);
 
         var editMenu = new ToolStripMenuItem("이미지 편집");
+        editMenu.DropDownItems.Add("상세 편집...", null, (_, _) => OpenCaptureEditor());
+        editMenu.DropDownItems.Add(new ToolStripSeparator());
         editMenu.DropDownItems.Add("좌우 반전", null, (_, _) => FlipHorizontal());
         editMenu.DropDownItems.Add("상하 반전", null, (_, _) => FlipVertical());
         editMenu.DropDownItems.Add("시계방향 회전", null, (_, _) => RotateCW());
